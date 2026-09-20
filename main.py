@@ -1,4 +1,7 @@
 import logging
+import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, events
 from config import API_ID, API_HASH, BOT_TOKEN
 
@@ -8,6 +11,23 @@ logger = logging.getLogger("TeraboxBot")
 if not API_ID or not API_HASH or not BOT_TOKEN:
     logger.error("Critical Error: API_ID, API_HASH, or BOT_TOKEN is missing in Environment Variables!")
     exit(1)
+
+# --- Render Port Check ke liye Dummy HTTP Server ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive and running!")
+
+def run_web_server():
+    port = int(os.getenv("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    logger.info(f"Dummy web server started on port {port}")
+    server.serve_forever()
+
+# Server ko background thread mein chala rahe hain taaki Render ka port timeout fix ho jaye
+threading.Thread(target=run_web_server, daemon=True).start()
+# ---------------------------------------------------
 
 # Telethon Bot Client initialize kar rahe hain
 bot = TelegramClient('terabox_bot', API_ID, API_HASH)
@@ -34,8 +54,6 @@ def main():
     logger.info("Starting Telegram Bot...")
     bot.start(bot_token=BOT_TOKEN)
     logger.info("Bot is running successfully!")
-    
-    # 👇 FIXED: yeh line bot ko online rakhegi aur crash nahi hone degi
     bot.run_until_disconnected()
 
 if __name__ == '__main__':
