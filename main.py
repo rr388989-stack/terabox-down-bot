@@ -34,7 +34,9 @@ def main():
     logger.info("Starting Telegram Bot...")
     bot.start(bot_token=BOT_TOKEN)
     logger.info("Bot is running successfully!")
-    bot.run_until_complete()
+    
+    # 👇 FIXED: yeh line bot ko online rakhegi aur crash nahi hone degi
+    bot.run_until_disconnected()
 
 if __name__ == '__main__':
     main()
