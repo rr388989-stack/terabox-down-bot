@@ -3,6 +3,7 @@ import os
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, events
+import requests
 import yt_dlp
 from config import API_ID, API_HASH, BOT_TOKEN, TERABOX_COOKIE
 
@@ -25,7 +26,6 @@ def run_web_server():
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     server.serve_forever()
 
-# Background server taaki Render ka timeout error na aaye
 threading.Thread(target=run_web_server, daemon=True).start()
 # ---------------------------------------------------
 
@@ -34,58 +34,85 @@ bot = TelegramClient('terabox_bot', API_ID, API_HASH)
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
     await event.reply(
-        "👋 **Welcome to Terabox Downloader Bot!**\n\n"
-        "Send me any Terabox link, and I will download and send the video to you!"
+        "👋 **Terabox Downloader Bot is Online!**\n\n"
+        "Send me any Terabox link, and I will process and download it for you."
     )
 
 @bot.on(events.NewMessage(pattern=r'https?://[^\s]+'))
 async def link_handler(event):
-    url = event.raw_text.strip()
-    # Terabox ya uske alternative domains check karne ke liye
-    if any(domain in url.lower() for domain in ["terabox", "1024tera", "freeterabox", "nephobox"]):
-        status_msg = await event.reply("📥 **Terabox link received!** Downloading video using your Cookie...")
+    raw_url = event.raw_text.strip()
+    
+    # Terabox aur uske saare alternative/redirect domains ko match karne ke liye
+    domains = ["terabox", "1024tera", "freeterabox", "nephobox", "teraboxlink"]
+    if any(d in raw_url.lower() for d in domains):
+        status_msg = await event.reply("📥 **Link received!** Resolving and downloading via your Cookie...")
         
         cookie_value = TERABOX_COOKIE
         if not cookie_value:
             await status_msg.edit("⚠️ **Error:** `COOKIE` environment variable is missing in Render dashboard!")
             return
 
-        # Cookie file create kar rahe hain yt-dlp ke liye
+        # Netscape Cookie File creation for all potential Terabox domains
         cookie_file = "cookies.txt"
-        with open(cookie_file, "w") as f:
-            f.write(f"# Netscape HTTP Cookie File\n.terabox.com\tTRUE\t/\tTRUE\t0\tndus\t{cookie_value}\n")
-            f.write(f".1024tera.com\tTRUE\t/\tTRUE\t0\tndus\t{cookie_value}\n")
+        try:
+            with open(cookie_file, "w", encoding="utf-8") as f:
+                f.write("# Netscape HTTP Cookie File\n")
+                f.write(f".terabox.com\tTRUE\t/\tTRUE\t0\tndus\t{cookie_value}\n")
+                f.write(f".1024tera.com\tTRUE\t/\tTRUE\t0\tndus\t{cookie_value}\n")
+                f.write(f".teraboxlink.com\tTRUE\t/\tTRUE\t0\tndus\t{cookie_value}\n")
+        except Exception as e:
+            logger.error(f"Cookie file write error: {e}")
+
+        # Step 1: Resolve short/redirect URLs (jaise dm.1024tera.com)
+        resolved_url = raw_url
+        try:
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            response = requests.get(raw_url, headers=headers, allow_redirects=True, timeout=12)
+            resolved_url = response.url
+        except Exception as ex:
+            logger.warning(f"Redirect resolution warning, falling back to raw URL: {ex}")
 
         downloaded_file = None
         try:
             ydl_opts = {
                 'cookiefile': cookie_file,
-                'outtmpl': '%(id)s.%(ext)s',
+                'outtmpl': 'downloaded_%(id)s.%(ext)s',
                 'format': 'best',
+                'socket_timeout': 30,
+                'no_warnings': True,
+                'ignoreerrors': False
             }
 
-            # Video download process
+            # Step 2: Extract and Download file using yt-dlp
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
+                info = ydl.extract_info(resolved_url, download=True)
                 downloaded_file = ydl.prepare_filename(info)
 
             if downloaded_file and os.path.exists(downloaded_file):
-                await status_msg.edit("📤 **Download complete!** Uploading video to Telegram...")
-                await event.client.send_file(
-                    event.chat_id,
-                    downloaded_file,
-                    caption=f"✅ **Here is your video!**\n🔗 {url}"
-                )
-                await status_msg.delete()
+                file_size = os.path.getsize(downloaded_file)
+                # Telegram bot file size limit check (approx 50MB for standard bot API)
+                if file_size > 50 * 1024 * 1024:
+                    await status_msg.edit("⚠️ File size 50MB se badi hai, jo Telegram Bot API limits se exceed ho rahi hai.")
+                else:
+                    await status_msg.edit("📤 **Download complete!** Uploading video to Telegram...")
+                    await event.client.send_file(
+                        event.chat_id,
+                        downloaded_file,
+                        caption=f"✅ **Here is your video!**\n🔗 {raw_url}"
+                    )
+                    await status_msg.delete()
             else:
-                await status_msg.edit("❌ Failed to fetch the video file from this link.")
+                await status_msg.edit("❌ File download nahi ho saki. Link expired ya protected ho sakta hai.")
 
+        except yt_dlp.utils.DownloadError as de:
+            logger.error(f"yt-dlp Download Error: {de}")
+            await status_msg.edit("❌ **Download Failed:** Link unsupported hai ya Terabox ne access block kar diya hai.")
         except Exception as e:
-            logger.error(f"Download Error: {e}")
-            await status_msg.edit(f"❌ **Download Failed:** Link expired ya protected ho sakta hai.")
+            logger.error(f"Unexpected Error: {e}")
+            await status_msg.edit("❌ **Error:** Link process karte waqt ek unexpected error aaya.")
 
         finally:
-            # Server space clean rakhne ke liye files delete kar rahe hain
+            # Cleanup temporary files to save server memory/storage
             if downloaded_file and os.path.exists(downloaded_file):
                 try:
                     os.remove(downloaded_file)
