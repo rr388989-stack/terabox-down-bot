@@ -1,2 +1,3 @@
-telethon>=1.45.0
-requests>=2.34.2
+telethon
+requests
+yt-dlp
