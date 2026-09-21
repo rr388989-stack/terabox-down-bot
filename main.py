@@ -90,7 +90,7 @@ def main():
         print("Error: BOT_TOKEN is missing in environment variables!")
         return
 
-    app = Application.Builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_media))
     
