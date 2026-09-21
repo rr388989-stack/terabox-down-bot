@@ -1,70 +1,102 @@
 import os
-import requests
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import yt_dlp
 
-# Configuration
-TELEGRAM_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-# Yahan tum apni self-hosted Terabox Gateway API ya public API endpoint ka URL daal sakte ho
-TERABOX_API_URL = "http://localhost:5000/api"  # Jaise terabox-gateway local ya cloud URL
+# --- 1. Render Port Health Check Server (Deployment fail nahi hogi) ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is active and running!")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def run_web_server():
+    port = int(os.getenv("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server.serve_forever()
+
+# Background mein web server start kar rahe hain
+threading.Thread(target=run_web_server, daemon=True).start()
+# ---------------------------------------------------------------------
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Hello! Main TeraBox Downloader Bot hoon.\n"
-        "Ab yeh powerful **TeraBox Gateway API** ke sath kaam karta hai, jisse cookies expire hone ki problem khatam ho gayi hai! 🚀\n\n"
-        "Bas mujhe TeraBox ki link bhejo."
+        "🤖 **Media Downloader Bot is Online!**\n\n"
+        "Send me any link from:\n"
+        "• **YouTube** (Videos / Shorts)\n"
+        "• **Instagram** (Reels / Posts)\n"
+        "• **Facebook, Twitter & 1000+ sites**\n\n"
+        "Main turant download karke bhej dunga!"
     )
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
+async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text.strip()
     
-    # Check if message contains a Terabox link
-    if "terabox" in text.lower() or "1024terabox" in text.lower():
-        msg = await update.message.reply_text("🔄 Processing link via TeraBox Gateway API...")
-        
-        try:
-            # API request bhej rahe hain resolve=true ke sath taaki direct download link mil jaye
-            params = {
-                "url": text.strip(),
-                "resolve": "true"
-            }
-            response = requests.get(TERABOX_API_URL, params=params, timeout=30)
-            data = response.json()
+    if not url.startswith("http"):
+        return
+
+    status_msg = await update.message.reply_text("📥 **Link received!** Downloading media...")
+
+    output_template = "downloaded_%(id)s.%(ext)s"
+    ydl_opts = {
+        'outtmpl': output_template,
+        'format': 'bestvideo+bestaudio/best/best',
+        'merge_output_format': 'mp4',
+        'no_warnings': True,
+        'socket_timeout': 30,
+    }
+
+    downloaded_file = None
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            downloaded_file = ydl.prepare_filename(info)
             
-            if response.status_code == 200 and "list" in data and len(data["list"]) > 0:
-                file_info = data["list"][0]
-                file_name = file_info.get("filename", "Unknown")
-                file_size = file_info.get("size", "Unknown")
-                download_link = file_info.get("dlink") or file_info.get("link")
-                
-                if download_link:
-                    reply_text = (
-                        f"✅ **File Found Successfully!**\n\n"
-                        f"📂 **Name:** `{file_name}`\n"
-                        f"📦 **Size:** `{file_size}`\n\n"
-                        f"📥 [Direct Download Link]({download_link})"
-                    )
-                    await msg.edit_text(reply_text, parse_mode="Markdown")
-                else:
-                    await msg.edit_text("❌ Direct download link extract nahi ho paya. Dobara try karein.")
+            # Agar file merge hokar .mp4 bani hai
+            if not os.path.exists(downloaded_file):
+                base, _ = os.path.splitext(downloaded_file)
+                if os.path.exists(base + '.mp4'):
+                    downloaded_file = base + '.mp4'
+
+        if downloaded_file and os.path.exists(downloaded_file):
+            file_size = os.path.getsize(downloaded_file)
+            if file_size > 50 * 1024 * 1024:
+                await status_msg.edit_text("⚠️ File size 50MB se badi hai, Telegram bot limit cross ho rahi hai.")
             else:
-                error_msg = data.get("error", "Unknown error occurred.")
-                await msg.edit_text(f"❌ API Error: {error_msg}")
-                
-        except Exception as e:
-            await msg.edit_text(f"⚠️ Error connecting to Terabox API: {str(e)}")
-    else:
-        await msg.reply_text("⚠️ Kripya ek valid TeraBox link bhejiye.")
+                await status_msg.edit_text("📤 **Download complete!** Uploading to Telegram...")
+                with open(downloaded_file, 'rb') as video_file:
+                    await update.message.reply_video(video=video_file, caption=f"✅ **Downloaded Successfully!**\n🔗 {url}")
+                await status_msg.delete()
+        else:
+            await status_msg.edit_text("❌ File download nahi ho saki.")
+
+    except Exception as e:
+        await status_msg.edit_text(f"❌ **Error:** Link unsupported, private, ya expired ho sakta hai.")
+    
+    finally:
+        # Cleanup temporary file from server
+        if downloaded_file and os.path.exists(downloaded_file):
+            try:
+                os.remove(downloaded_file)
+            except:
+                pass
 
 def main():
-    app = Application.Builder().token(TELEGRAM_TOKEN).build()
+    if not BOT_TOKEN:
+        print("Error: BOT_TOKEN is missing in environment variables!")
+        return
+
+    app = Application.Builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_media))
     
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    print("🤖 Bot is running with TeraBox API integration...")
+    print("Bot is running successfully...")
     app.run_polling()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
 
